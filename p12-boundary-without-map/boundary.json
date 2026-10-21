@@ -1,0 +1,16 @@
+{
+  "changed": [
+    "membership/api/contract.test.ts",
+    "membership/api/contract.ts",
+    "ordering/domain/order.test.ts",
+    "ordering/domain/order.ts",
+    "ordering/domain/promo.ts"
+  ],
+  "membership_internal_changed": [],
+  "contract_changed": [
+    "membership/api/contract.test.ts",
+    "membership/api/contract.ts"
+  ],
+  "internal_import": [],
+  "crossed": true
+}

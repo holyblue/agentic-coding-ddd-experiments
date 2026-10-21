@@ -1,0 +1,141 @@
+diff --git a/membership/api/contract.test.ts b/membership/api/contract.test.ts
+index 16b84f0..7ed12f1 100644
+--- a/membership/api/contract.test.ts
++++ b/membership/api/contract.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, it } from "vitest";
+-import { getMember, memberDiscountPercent } from "./contract";
++import { getMember, hasBeenMemberForYear, memberDiscountPercent } from "./contract";
+ 
+ describe("membership contract", () => {
+   it("gives each tier its discount", () => {
+@@ -11,4 +11,17 @@ describe("membership contract", () => {
+     expect(getMember("m2")).toEqual({ id: "m2", tier: "vip" });
+     expect(getMember("nope")).toBeUndefined();
+   });
++
++  it("knows whether a member has been a member for a year", () => {
++    expect(hasBeenMemberForYear("m1", "2026-10-15")).toBe(true);
++    expect(hasBeenMemberForYear("m3", "2026-10-15")).toBe(false);
++    expect(hasBeenMemberForYear("m3", "2027-08-19")).toBe(false);
++    expect(hasBeenMemberForYear("m3", "2027-08-20")).toBe(true);
++    expect(hasBeenMemberForYear("nope", "2026-10-15")).toBe(false);
++  });
++
++  it("counts a returning member from the rejoin date", () => {
++    expect(hasBeenMemberForYear("m4", "2027-05-04")).toBe(false);
++    expect(hasBeenMemberForYear("m4", "2027-05-05")).toBe(true);
++  });
+ });
+diff --git a/membership/api/contract.ts b/membership/api/contract.ts
+index 8cef40f..b7b9dd2 100644
+--- a/membership/api/contract.ts
++++ b/membership/api/contract.ts
+@@ -14,6 +14,15 @@ export function getMember(id: string): Member | undefined {
+   return record && { id: record.id, tier: record.tier };
+ }
+ 
++// 入會滿一年：從目前這段會籍的起點算起（退會後重新入會者，以重新入會日為準）。
++export function hasBeenMemberForYear(id: string, asOf: string): boolean {
++  const record = findMemberRecord(id);
++  if (!record) return false;
++  const since = record.rejoinedAt ?? record.joinedAt;
++  const anniversary = `${Number(since.slice(0, 4)) + 1}${since.slice(4)}`;
++  return anniversary <= asOf;
++}
++
+ export function memberDiscountPercent(tier: MemberTier): number {
+   switch (tier) {
+     case "vip":
+diff --git a/ordering/domain/order.test.ts b/ordering/domain/order.test.ts
+index e3796c3..dbcc08b 100644
+--- a/ordering/domain/order.test.ts
++++ b/ordering/domain/order.test.ts
+@@ -25,4 +25,39 @@ describe("order", () => {
+     expect(total({ member: vip, lines: [line(1000)] }, "AUTUMN15")).toBe(850);
+     expect(total({ member: vip, lines: [line(1000)] }, "WELCOME5")).toBe(900);
+   });
++
++  describe("LOYAL10", () => {
++    const asOf = "2026-10-15";
++    const m3 = { id: "m3", tier: "regular" as const }; // 2026-08-20 入會，未滿一年
++    const m4 = { id: "m4", tier: "vip" as const }; // 退會後 2026-05-05 重新入會，未滿一年
++
++    it("gives 10% off to a member of at least one year", () => {
++      expect(total({ member: regular, lines: [line(1000)] }, "LOYAL10", asOf)).toBe(900);
++      expect(total({ member: regular, lines: [line(1000)] }, "loyal10", asOf)).toBe(900);
++    });
++
++    it("is invalid for a member of less than one year", () => {
++      expect(total({ member: m3, lines: [line(1000)] }, "LOYAL10", asOf)).toBe(1000);
++    });
++
++    it("counts from the rejoin date for a returning member", () => {
++      // 雖然最早 2020 年就入會，但目前這段會籍未滿一年，視為無效促銷碼（VIP 折扣照舊）
++      expect(total({ member: m4, lines: [line(1000)] }, "LOYAL10", asOf)).toBe(900);
++      expect(total({ member: m4, lines: [line(1000)] }, "LOYAL10", "2027-05-05")).toBe(900);
++    });
++
++    it("is invalid for an unknown member", () => {
++      const ghost = { id: "nope", tier: "regular" as const };
++      expect(total({ member: ghost, lines: [line(1000)] }, "LOYAL10", asOf)).toBe(1000);
++    });
++
++    it("does not stack with the VIP discount", () => {
++      expect(total({ member: vip, lines: [line(1000)] }, "LOYAL10", asOf)).toBe(900);
++    });
++
++    it("becomes valid on the one-year anniversary", () => {
++      expect(total({ member: m3, lines: [line(1000)] }, "LOYAL10", "2027-08-19")).toBe(1000);
++      expect(total({ member: m3, lines: [line(1000)] }, "LOYAL10", "2027-08-20")).toBe(900);
++    });
++  });
+ });
+diff --git a/ordering/domain/order.ts b/ordering/domain/order.ts
+index 2aa4cc3..bd7e4dd 100644
+--- a/ordering/domain/order.ts
++++ b/ordering/domain/order.ts
+@@ -1,4 +1,4 @@
+-import { memberDiscountPercent, type Member } from "../../membership/api/contract";
++import { hasBeenMemberForYear, memberDiscountPercent, type Member } from "../../membership/api/contract";
+ import { findPromo } from "./promo";
+ 
+ export interface OrderLine {
+@@ -20,10 +20,17 @@ function percentOf(amount: number, percent: number): number {
+   return Math.floor((amount * percent) / 100);
+ }
+ 
+-export function total(order: Order, promoCode?: string): number {
++function today(): string {
++  return new Date().toISOString().slice(0, 10);
++}
++
++export function total(order: Order, promoCode?: string, asOf: string = today()): number {
+   const sub = subtotal(order);
+   const memberOff = percentOf(sub, memberDiscountPercent(order.member.tier));
+-  const promo = promoCode ? findPromo(promoCode) : undefined;
++  const found = promoCode ? findPromo(promoCode) : undefined;
++  // 不符合資格的會員，當成無效的促銷碼
++  const promo =
++    found?.requiresOneYearMember && !hasBeenMemberForYear(order.member.id, asOf) ? undefined : found;
+   const promoOff = promo ? percentOf(sub, promo.percentOff) : 0;
+   if (order.member.tier === "vip" && promo) {
+     return sub - Math.max(memberOff, promoOff);
+diff --git a/ordering/domain/promo.ts b/ordering/domain/promo.ts
+index 9632171..2447054 100644
+--- a/ordering/domain/promo.ts
++++ b/ordering/domain/promo.ts
+@@ -1,11 +1,13 @@
+ export interface PromoCode {
+   code: string;
+   percentOff: number;
++  requiresOneYearMember?: boolean; // 僅限入會滿一年的會員
+ }
+ 
+ const PROMO_CODES: PromoCode[] = [
+   { code: "AUTUMN15", percentOff: 15 },
+   { code: "WELCOME5", percentOff: 5 },
++  { code: "LOYAL10", percentOff: 10, requiresOneYearMember: true },
+ ];
+ 
+ export function findPromo(code: string): PromoCode | undefined {

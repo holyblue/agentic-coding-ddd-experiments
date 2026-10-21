@@ -1,0 +1,62 @@
+commit e7b6ab7fdc30ec385464aa8cce87703adcd02a17
+Author: Bruce <（email 已移除）>
+Date:   Thu Oct 15 06:54:06 2026 +0800
+
+    VIP 折扣與促銷碼不可併用，自動採用折扣較大者
+    
+    依據：業務在確認頁的回覆。
+    - VIP 折扣不能和促銷碼一起用，只能選一個，系統自動用折扣比較大的那個。
+    - 例：VIP 搭配較小的促銷碼，只能選一個，應付 900，不是疊加後的結果。
+    - 因不能併用，「先扣哪一個」的問題不適用。
+    - 最低應付金額：業務尚未給數字，本次不實作。
+    
+    Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+diff --git a/ordering/domain/order.test.ts b/ordering/domain/order.test.ts
+index c7891cf..49cb6b3 100644
+--- a/ordering/domain/order.test.ts
++++ b/ordering/domain/order.test.ts
+@@ -35,8 +35,16 @@ describe("order", () => {
+       expect(total({ member: regular, lines }, "")).toBe(1000);
+     });
+ 
+-    it("stacks with the VIP discount", () => {
+-      expect(total({ member: vip, lines }, "AUTUMN15")).toBe(765); // 1000 -> 900 -> 765
++    it("does not stack with the VIP discount: uses the larger one (promo wins)", () => {
++      expect(total({ member: vip, lines }, "AUTUMN15")).toBe(850); // 15% > VIP 10%
++    });
++
++    it("does not stack with the VIP discount: uses the larger one (VIP wins)", () => {
++      expect(total({ member: vip, lines }, "WELCOME5")).toBe(900); // VIP 10% > 5%，不是 855
++    });
++
++    it("keeps the VIP discount when the promo code is unknown", () => {
++      expect(total({ member: vip, lines }, "NOPE")).toBe(900);
+     });
+   });
+ });
+diff --git a/ordering/domain/order.ts b/ordering/domain/order.ts
+index ffaea97..2a5939f 100644
+--- a/ordering/domain/order.ts
++++ b/ordering/domain/order.ts
+@@ -22,14 +22,12 @@ function applyPercentOff(amount: number, percent: number): number {
+   return amount - Math.floor((amount * percent) / 100);
+ }
+ 
++// 業務確認：VIP 折扣與促銷碼不能一起用，系統自動採用折扣較大的那個。
+ export function total(order: Order, promoCode?: string): number {
+-  let result = subtotal(order);
+-  if (order.member.tier === "vip") {
+-    result = applyPercentOff(result, VIP_DISCOUNT_PERCENT);
+-  }
++  const base = subtotal(order);
++  const vipTotal =
++    order.member.tier === "vip" ? applyPercentOff(base, VIP_DISCOUNT_PERCENT) : base;
+   const promo = promoCode ? findPromo(promoCode) : undefined;
+-  if (promo) {
+-    result = applyPercentOff(result, promo.percentOff);
+-  }
+-  return result;
++  const promoTotal = promo ? applyPercentOff(base, promo.percentOff) : base;
++  return Math.min(vipTotal, promoTotal);
+ }

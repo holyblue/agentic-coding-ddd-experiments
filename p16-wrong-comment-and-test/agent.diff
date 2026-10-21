@@ -1,0 +1,78 @@
+diff --git a/ordering/domain/order.test.ts b/ordering/domain/order.test.ts
+index 3d6dfb6..4e68292 100644
+--- a/ordering/domain/order.test.ts
++++ b/ordering/domain/order.test.ts
+@@ -15,4 +15,32 @@ describe("order", () => {
+     const order = { member: vip, lines: [{ sku: "A", unitPrice: 1000, quantity: 1 }] };
+     expect(total(order)).toBe(900);
+   });
++
++  describe("promo code", () => {
++    const order = { member: regular, lines: [{ sku: "A", unitPrice: 1000, quantity: 1 }] };
++
++    it("applies a valid promo code", () => {
++      expect(total(order, "AUTUMN15")).toBe(850);
++    });
++
++    it("matches codes case-insensitively", () => {
++      expect(total(order, "autumn15")).toBe(850);
++    });
++
++    it("ignores unknown or empty codes", () => {
++      expect(total(order, "NOPE")).toBe(1000);
++      expect(total(order, "")).toBe(1000);
++    });
++
++    it("rounds the promo discount down", () => {
++      // 15% of 999 = 149.85 -> 149 off
++      const odd = { member: regular, lines: [{ sku: "A", unitPrice: 999, quantity: 1 }] };
++      expect(total(odd, "AUTUMN15")).toBe(850);
++    });
++
++    it("leaves VIP discount in place when the code is unknown", () => {
++      const vipOrder = { member: vip, lines: [{ sku: "A", unitPrice: 1000, quantity: 1 }] };
++      expect(total(vipOrder, "NOPE")).toBe(900);
++    });
++  });
+ });
+diff --git a/ordering/domain/order.ts b/ordering/domain/order.ts
+index a885b22..ac828db 100644
+--- a/ordering/domain/order.ts
++++ b/ordering/domain/order.ts
+@@ -1,4 +1,5 @@
+ import type { Member } from "../../membership/api/contract";
++import { findPromo } from "./promo";
+ 
+ export interface OrderLine {
+   sku: string;
+@@ -11,18 +12,23 @@ export interface Order {
+   lines: OrderLine[];
+ }
+ 
+-// VIP 折扣可以和促銷碼併用。
++// VIP 折扣和促銷碼不疊加,只套用折扣較大的一個。
+ export const VIP_DISCOUNT_PERCENT = 10;
+ 
+ export function subtotal(order: Order): number {
+   return order.lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
+ }
+ 
+-export function total(order: Order): number {
++function percentDiscount(amount: number, percent: number): number {
++  // 折扣金額無條件捨去到分。
++  return Math.floor((amount * percent) / 100);
++}
++
++export function total(order: Order, promoCode?: string): number {
+   const sub = subtotal(order);
+-  if (order.member.tier === "vip") {
+-    // 折扣金額四捨五入到分。
+-    return sub - Math.floor((sub * VIP_DISCOUNT_PERCENT) / 100);
+-  }
+-  return sub;
++  const vipDiscount =
++    order.member.tier === "vip" ? percentDiscount(sub, VIP_DISCOUNT_PERCENT) : 0;
++  const promo = promoCode === undefined ? undefined : findPromo(promoCode);
++  const promoDiscount = promo ? percentDiscount(sub, promo.percentOff) : 0;
++  return sub - Math.max(vipDiscount, promoDiscount);
+ }
